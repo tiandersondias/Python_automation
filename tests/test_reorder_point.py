@@ -13,7 +13,7 @@ def test_calculate_reorder_points_uses_per_sku_lead_times(monkeypatch):
             "lead_time_days": [2, 2, 7],
         }
     )
-    monkeypatch.setattr(reorder_point.pd, "read_sql_query", lambda *_args: demand)
+    monkeypatch.setattr(reorder_point, "read_query_dataframe", lambda *_args: demand)
 
     result = reorder_point.calculate_reorder_points(object())
 
@@ -24,11 +24,9 @@ def test_calculate_reorder_points_uses_per_sku_lead_times(monkeypatch):
 
 def test_calculate_reorder_points_returns_empty_schema(monkeypatch):
     monkeypatch.setattr(
-        reorder_point.pd,
-        "read_sql_query",
-        lambda *_args: pd.DataFrame(
-            columns=["sku", "day", "qty", "lead_time_days"]
-        ),
+        reorder_point,
+        "read_query_dataframe",
+        lambda *_args: pd.DataFrame(columns=["sku", "day", "qty", "lead_time_days"]),
     )
 
     result = reorder_point.calculate_reorder_points(object())
@@ -56,7 +54,16 @@ def test_calculate_reorder_points_rejects_invalid_inputs(monkeypatch):
             "lead_time_days": [-1],
         }
     )
-    monkeypatch.setattr(reorder_point.pd, "read_sql_query", lambda *_args: demand)
+    monkeypatch.setattr(reorder_point, "read_query_dataframe", lambda *_args: demand)
 
     with pytest.raises(ValueError, match="lead_time_days"):
         reorder_point.calculate_reorder_points(object())
+
+
+def test_reorder_cli_rejects_nonpositive_service_level(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["reorder_point.py", "--service-level-z", "0"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        reorder_point.main()
+
+    assert exc_info.value.code == 2

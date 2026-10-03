@@ -1,10 +1,11 @@
 import os
 import uuid
-from pathlib import Path
 
 import psycopg
 import pytest
 from psycopg import sql
+
+from migrate import apply_migrations
 
 
 @pytest.fixture
@@ -14,8 +15,6 @@ def postgres_connection():
         pytest.skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
 
     schema_name = f"test_{uuid.uuid4().hex}"
-    schema_sql = (Path(__file__).resolve().parents[1] / "sql" / "schema.sql").read_text()
-
     try:
         with psycopg.connect(database_url, autocommit=True) as admin_conn:
             admin_conn.execute(
@@ -26,7 +25,7 @@ def postgres_connection():
             conn.execute(
                 sql.SQL("SET search_path TO {}").format(sql.Identifier(schema_name))
             )
-            conn.execute(schema_sql)
+            apply_migrations(conn)
             yield conn
     finally:
         with psycopg.connect(database_url, autocommit=True) as admin_conn:
