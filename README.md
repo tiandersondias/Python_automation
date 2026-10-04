@@ -44,8 +44,11 @@ PostgreSQL is unavailable or the required tables have not been migrated.
 Connection URLs and credentials are not included in error messages.
 
 `reorder_point.py` reads `daily_demand` and each SKU's `lead_time_days`.
-`batch_picking.py` produces a walking-order plan for open pick lines using
-warehouse location and `pick_sequence`.
+`batch_picking.py` produces an executable walking-order plan for open pick lines
+using warehouse location and `pick_sequence`. Each output row includes the
+`batch_id`, `order_id`, `pick_line_id`, SKU, location, quantity, route fields,
+and total units assigned to that batch, so CSV/JSON output can be handed to a
+picker or downstream execution process without reconstructing order membership.
 
 Both utilities support `--output-format table|csv|json`. Reorder points also
 support `--service-level-z`, which must be greater than zero:
@@ -56,7 +59,8 @@ support `--service-level-z`, which must be greater than zero:
 ```
 
 Batch picking uses a default capacity of 100 units, assigns complete orders
-greedily without splitting them, and accepts a custom capacity:
+greedily without splitting them, and accepts a custom capacity. The planner
+rejects any order larger than the configured capacity:
 
 ```bash
 .venv/bin/python batch_picking.py --max-units 250
@@ -78,14 +82,18 @@ psql "$DATABASE_URL" -f sql/inventory_accuracy_checks.sql
 ABC slotting uses completed (`PICKED`) lines from the last 90 days. Inventory
 accuracy uses the latest cycle count for each SKU/location pair.
 `SHORT` pick lines require a reason and a positive short quantity not exceeding
-the requested quantity. Run `sql/data_quality_checks.sql` to review legacy
-records that need cleanup.
+the requested quantity. New writes reject future demand dates, blank location
+zones, nonpositive pick sequences, and invalid transitions away from completed
+pick-line states. Run `sql/data_quality_checks.sql` to review legacy records
+that need cleanup before validating the `NOT VALID` constraints.
 
 The CLI utilities log report parameters, UTC generation timestamps, and
 failure categories to stderr without logging database URLs or credentials.
 Migration `003_audit_history.sql` adds history tables and triggers for pick
-status transitions and stock quantity changes. Applications can identify the
-acting operator for these triggers with:
+status transitions and stock quantity changes. Migration
+`005_audit_security.sql` records the authenticated PostgreSQL session user
+alongside the application actor and restricts public execution of the trigger
+functions. Applications can identify the acting operator for these triggers with:
 
 ```sql
 SELECT set_config('app.user', 'operator-id', true);

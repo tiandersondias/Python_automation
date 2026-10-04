@@ -10,6 +10,8 @@ def test_schema_entrypoint_includes_all_migrations_in_order():
         "002_data_quality_constraints.sql",
         "003_audit_history.sql",
         "004_validate_data_quality_constraints.sql",
+        "005_audit_security.sql",
+        "006_write_data_quality.sql",
     ]
     positions = [schema_sql.index(name) for name in migration_names]
 

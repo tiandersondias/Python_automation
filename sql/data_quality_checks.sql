@@ -37,4 +37,19 @@ SELECT
     'daily demand date is in the future' AS details
 FROM daily_demand
 WHERE day > CURRENT_DATE
+UNION ALL
+SELECT
+    'location_metadata' AS issue,
+    location_id AS record_id,
+    'zone must be nonblank and pick_sequence must be positive' AS details
+FROM location
+WHERE btrim(zone) = ''
+   OR (pick_sequence IS NOT NULL AND pick_sequence <= 0)
+UNION ALL
+SELECT
+    'missing_demand_date' AS issue,
+    COALESCE(sku, '<null>') AS record_id,
+    'daily demand day is required' AS details
+FROM daily_demand
+WHERE day IS NULL
 ORDER BY issue, record_id

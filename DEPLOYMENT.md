@@ -21,6 +21,11 @@ postgresql://warehouse_app:<secret>@db.example.com:5432/warehouse?sslmode=verify
 - Do not expose PostgreSQL directly to the public internet.
 - Use firewall/security-group rules and rotate credentials regularly.
 - Confirm the runtime role cannot create schemas, alter tables, or run migrations.
+- Apply the audit-owner section of `sql/security_roles.sql` so audit trigger
+  functions are owned by the non-login `warehouse_audit_owner` role.
+- Ensure the runtime role cannot insert, update, delete, or truncate audit
+  history, and treat `database_user` as the authoritative database identity;
+  `app.user` is supplemental application attribution.
 - Review `sql/security_roles.sql` before applying it to a shared database.
 
 ## Backups and recovery

@@ -16,23 +16,24 @@ OPEN_PICK_LINES_SQL = (
 
 
 def build_pick_batches(pick_lines: pd.DataFrame, max_units: int = 100) -> pd.DataFrame:
-    """Assign complete orders to capacity-limited batches."""
+    """Assign complete orders to capacity-limited, executable batches."""
+    output_columns = [
+        "batch_id",
+        "order_id",
+        "pick_line_id",
+        "sku",
+        "pick_sequence",
+        "zone",
+        "location_id",
+        "qty",
+        "batch_units",
+    ]
     if max_units <= 0:
         raise ValueError("max_units must be greater than zero")
     if pick_lines.empty:
-        return pd.DataFrame(
-            columns=[
-                "batch_id",
-                "pick_sequence",
-                "zone",
-                "location_id",
-                "orders",
-                "lines",
-                "units",
-            ]
-        )
+        return pd.DataFrame(columns=output_columns)
 
-    order_units = pick_lines.groupby("order_id")["qty"].sum()
+    order_units = pick_lines.groupby("order_id", sort=True)["qty"].sum()
     oversized = order_units[order_units > max_units]
     if not oversized.empty:
         raise ValueError(
@@ -52,24 +53,16 @@ def build_pick_batches(pick_lines: pd.DataFrame, max_units: int = 100) -> pd.Dat
 
     planned = pick_lines.copy()
     planned["batch_id"] = planned["order_id"].map(order_batch)
-    return (
-        planned.groupby(
-            ["batch_id", "pick_sequence", "zone", "location_id"], as_index=False
-        )
-        .agg(
-            orders=("order_id", "nunique"),
-            lines=("order_id", "size"),
-            units=("qty", "sum"),
-        )
-        .sort_values(["batch_id", "zone", "pick_sequence", "location_id"])
-        .reset_index(drop=True)
-    )
+    planned["batch_units"] = planned.groupby("batch_id")["qty"].transform("sum")
+    return planned.sort_values(
+        ["batch_id", "zone", "pick_sequence", "location_id", "order_id"]
+    )[output_columns].reset_index(drop=True)
 
 
 def get_open_pick_batches(
     conn: psycopg.Connection, max_units: int = 100
 ) -> pd.DataFrame:
-    """Return a capacity-limited, route-ordered plan for complete orders."""
+    """Return executable pick-line details grouped into complete orders."""
     pick_lines = read_query_dataframe(conn, OPEN_PICK_LINES_SQL)
     return build_pick_batches(pick_lines, max_units=max_units)
 

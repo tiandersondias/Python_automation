@@ -2,6 +2,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 import batch_picking
 import migrate
@@ -113,12 +114,14 @@ def test_postgres_schema_and_reports(postgres_connection):
             [
                 {
                     "batch_id": 1,
+                    "order_id": 1002,
+                    "pick_line_id": batch_frame.iloc[0]["pick_line_id"],
+                    "sku": "FAST",
                     "pick_sequence": 10,
                     "zone": "A",
                     "location_id": "A-01-01",
-                    "orders": 1,
-                    "lines": 1,
-                    "units": 5,
+                    "qty": 5,
+                    "batch_units": 5,
                 }
             ]
         ),
@@ -137,16 +140,74 @@ def test_postgres_schema_and_reports(postgres_connection):
     )
     postgres_connection.commit()
     assert postgres_connection.execute(
-        "SELECT old_status, new_status, changed_by FROM pick_line_status_history"
-    ).fetchall() == [("OPEN", "PICKED", "integration-test")]
+        "SELECT old_status, new_status, changed_by, database_user "
+        "FROM pick_line_status_history"
+    ).fetchall() == [("OPEN", "PICKED", "integration-test", "postgres")]
     assert postgres_connection.execute(
         "SELECT old_system_qty, new_system_qty, changed_by "
-        "FROM stock_adjustment_history"
-    ).fetchall() == [(10, 8, "integration-test")]
+        ", database_user FROM stock_adjustment_history"
+    ).fetchall() == [(10, 8, "integration-test", "postgres")]
+
+
+def test_audit_functions_have_hardened_search_path_and_execute_privileges(
+    postgres_connection,
+):
+    rows = postgres_connection.execute(
+        """
+        SELECT
+            p.proname,
+            p.proconfig,
+            NOT EXISTS (
+                SELECT 1
+                FROM aclexplode(
+                    COALESCE(p.proacl, acldefault('f', p.proowner))
+                ) AS acl
+                WHERE acl.grantee = 0
+                  AND acl.privilege_type = 'EXECUTE'
+            ) AS public_execute_revoked
+        FROM pg_proc AS p
+        JOIN pg_namespace AS n ON n.oid = p.pronamespace
+        WHERE n.nspname = current_schema()
+          AND p.proname IN (
+              'record_pick_line_status_change',
+              'record_stock_adjustment'
+          )
+        ORDER BY p.proname
+        """
+    ).fetchall()
+
+    assert [row[1] for row in rows] == [
+        ["search_path=pg_catalog"],
+        ["search_path=pg_catalog"],
+    ]
+    assert all(row[2] for row in rows)
+
+
+def test_write_time_data_quality_rules(postgres_connection):
+    seed_database(postgres_connection)
+
+    with pytest.raises(Exception, match="future"):
+        postgres_connection.execute(
+            """
+            INSERT INTO daily_demand (sku, day, qty)
+            VALUES ('FAST', CURRENT_DATE + 1, 1)
+            """
+        )
+    postgres_connection.rollback()
+
+    with pytest.raises(Exception, match="cannot transition"):
+        postgres_connection.execute(
+            """
+            UPDATE pick_lines
+            SET status = 'OPEN'
+            WHERE status = 'PICKED'
+            """
+        )
+    postgres_connection.rollback()
 
 
 def test_failed_migration_rolls_back_completely(postgres_connection, tmp_path):
-    migration = tmp_path / "005_intentionally_fails.sql"
+    migration = tmp_path / "007_intentionally_fails.sql"
     migration.write_text(
         """
         CREATE TABLE should_be_rolled_back (id INT);
@@ -169,7 +230,7 @@ def test_failed_migration_rolls_back_completely(postgres_connection, tmp_path):
     )
     assert (
         postgres_connection.execute(
-            "SELECT version FROM schema_migrations WHERE version = '005'"
+            "SELECT version FROM schema_migrations WHERE version = '007'"
         ).fetchone()
         is None
     )
@@ -179,11 +240,11 @@ def test_out_of_order_migration_is_rejected(postgres_connection, tmp_path):
     postgres_connection.execute(
         """
         INSERT INTO schema_migrations (version, name)
-        VALUES ('006', 'future_migration.sql')
+        VALUES ('009', 'future_migration.sql')
         """
     )
     postgres_connection.commit()
-    migration = tmp_path / "005_out_of_order.sql"
+    migration = tmp_path / "008_out_of_order.sql"
     migration.write_text("SELECT 1;")
 
     try:
@@ -193,3 +254,23 @@ def test_out_of_order_migration_is_rejected(postgres_connection, tmp_path):
         assert "out of order" in str(exc)
     else:
         raise AssertionError("out-of-order migration unexpectedly succeeded")
+
+
+def test_modified_applied_migration_is_rejected(postgres_connection, tmp_path):
+    migration = tmp_path / "007_checksum_test.sql"
+    migration.write_text("CREATE TABLE checksum_test (id INT);")
+
+    assert migrate.apply_migrations(postgres_connection, migrations_dir=tmp_path) == [
+        "007_checksum_test.sql"
+    ]
+    postgres_connection.rollback()
+    migration.write_text("CREATE TABLE checksum_test (id BIGINT);")
+
+    with pytest.raises(RuntimeError, match="modified after application"):
+        migrate.apply_migrations(postgres_connection, migrations_dir=tmp_path)
+    postgres_connection.rollback()
+
+
+def test_migration_rerun_is_idempotent(postgres_connection):
+    assert migrate.apply_migrations(postgres_connection) == []
+    assert migrate.apply_migrations(postgres_connection) == []

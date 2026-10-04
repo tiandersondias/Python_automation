@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import os
 import re
 import sys
@@ -36,6 +37,10 @@ def acquire_migration_lock(conn: psycopg.Connection) -> None:
 MIGRATION_LOCK_KEY = 914_2026
 
 
+def migration_checksum(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def apply_migrations(
     conn: psycopg.Connection, *, migrations_dir: Path = MIGRATIONS_DIR
 ) -> list[str]:
@@ -46,13 +51,19 @@ def apply_migrations(
         CREATE TABLE IF NOT EXISTS schema_migrations (
             version VARCHAR(100) PRIMARY KEY,
             name VARCHAR(255) NOT NULL,
+            checksum VARCHAR(64),
             applied_at TIMESTAMP NOT NULL DEFAULT now()
         )
         """
     )
+    conn.execute(
+        "ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum VARCHAR(64)"
+    )
     applied = {
-        row[0]
-        for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
+        row[0]: (row[1], row[2])
+        for row in conn.execute(
+            "SELECT version, name, checksum FROM schema_migrations"
+        ).fetchall()
     }
     applied_versions = {int(version) for version in applied}
     pending = []
@@ -60,16 +71,36 @@ def apply_migrations(
     for version, path in migrations:
         numeric_version = int(version)
         if version in applied:
+            applied_name, applied_checksum = applied[version]
+            checksum = migration_checksum(path)
+            if applied_name != path.name:
+                raise RuntimeError(
+                    f"migration {path.name} does not match recorded name "
+                    f"{applied_name!r}"
+                )
+            if applied_checksum is None:
+                conn.execute(
+                    "UPDATE schema_migrations SET checksum = %s WHERE version = %s",
+                    (checksum, version),
+                )
+            elif applied_checksum != checksum:
+                raise RuntimeError(
+                    f"migration {path.name} has been modified after application"
+                )
             continue
         if any(previous > numeric_version for previous in applied_versions):
             raise RuntimeError(
                 f"migration {path.name} is out of order; "
                 "a newer migration is already applied"
             )
+        checksum = migration_checksum(path)
         conn.execute(path.read_text())
         conn.execute(
-            "INSERT INTO schema_migrations (version, name) VALUES (%s, %s)",
-            (version, path.name),
+            """
+            INSERT INTO schema_migrations (version, name, checksum)
+            VALUES (%s, %s, %s)
+            """,
+            (version, path.name, checksum),
         )
         pending.append(path.name)
 
