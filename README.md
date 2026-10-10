@@ -27,6 +27,19 @@ Initialize a new database with the migration runner:
 See [MIGRATIONS.md](MIGRATIONS.md) for migration and rollback procedures.
 See [DEPLOYMENT.md](DEPLOYMENT.md) for production TLS, roles, network,
 backup, and recovery guidance.
+
+## Frontend
+
+The Reflex frontend provides the initial warehouse operations dashboard:
+
+```bash
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/reflex run
+```
+
+The app is organized under `warehouse_dashboard/`. The initial dashboard uses
+representative UI data; the existing PostgreSQL reports are the next integration
+point for the inventory, orders, and reports views.
 Migration safety tests cover rollback of failed migrations and rejection of
 out-of-order files; run the PostgreSQL integration suite to exercise them.
 For a disposable database or a direct `psql` workflow, the compatibility
