@@ -79,13 +79,16 @@ WHERE pick_date >= CURRENT_DATE - INTERVAL '30 days';
 """
 
 
-def get_dashboard_metrics() -> DashboardMetrics:
+def get_dashboard_metrics(operator: str | None = None) -> DashboardMetrics:
     """Read the overview metrics from PostgreSQL."""
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
         raise RuntimeError("DATABASE_URL is not configured")
 
     with psycopg.connect(database_url) as conn:
+        if operator:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT set_config('app.user', %s, true)", (operator,))
         with conn.cursor() as cursor:
             cursor.execute(DASHBOARD_METRICS_SQL)
             row = cursor.fetchone()
@@ -125,13 +128,16 @@ ORDER BY st.system_qty - (
 """
 
 
-def get_inventory() -> list[InventoryItem]:
+def get_inventory(operator: str | None = None) -> list[InventoryItem]:
     """Read stock balances and calculated reorder points from PostgreSQL."""
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
         raise RuntimeError("DATABASE_URL is not configured")
 
     with psycopg.connect(database_url) as conn:
+        if operator:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT set_config('app.user', %s, true)", (operator,))
         with conn.cursor() as cursor:
             cursor.execute(INVENTORY_SQL)
             rows = cursor.fetchall()
@@ -188,16 +194,20 @@ ORDER BY p.order_id, l.zone, l.pick_sequence, p.location_id;
 """
 
 
-def _connect() -> psycopg.Connection:
+def _connect(operator: str | None = None) -> psycopg.Connection:
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
         raise RuntimeError("DATABASE_URL is not configured")
-    return psycopg.connect(database_url)
+    conn = psycopg.connect(database_url)
+    if operator:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT set_config('app.user', %s, true)", (operator,))
+    return conn
 
 
-def get_open_orders() -> list[OrderItem]:
+def get_open_orders(operator: str | None = None) -> list[OrderItem]:
     """Read open orders and their current open pick-line totals."""
-    with _connect() as conn:
+    with _connect(operator) as conn:
         with conn.cursor() as cursor:
             cursor.execute(ORDERS_SQL)
             rows = cursor.fetchall()
@@ -212,12 +222,14 @@ def get_open_orders() -> list[OrderItem]:
     ]
 
 
-def get_pick_batches(max_units: int = 100) -> list[PickBatchItem]:
+def get_pick_batches(
+    max_units: int = 100, operator: str | None = None
+) -> list[PickBatchItem]:
     """Build complete-order picking batches from open PostgreSQL pick lines."""
     if max_units <= 0:
         raise ValueError("max_units must be greater than zero")
 
-    with _connect() as conn:
+    with _connect(operator) as conn:
         with conn.cursor() as cursor:
             cursor.execute(OPEN_PICK_LINES_SQL)
             rows = cursor.fetchall()
@@ -272,14 +284,16 @@ REPORT_SQL = {
 }
 
 
-def get_report(name: str) -> tuple[list[str], list[ReportRow]]:
+def get_report(
+    name: str, operator: str | None = None
+) -> tuple[list[str], list[ReportRow]]:
     """Execute one of the reviewed SQL reports and format its result."""
     try:
         report_path = REPORT_SQL[name]
     except KeyError as exc:
         raise ValueError(f"Unknown report: {name}") from exc
 
-    with _connect() as conn:
+    with _connect(operator) as conn:
         with conn.cursor() as cursor:
             cursor.execute(report_path.read_text())
             rows = cursor.fetchall()

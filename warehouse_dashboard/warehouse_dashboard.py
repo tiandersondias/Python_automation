@@ -1,3 +1,8 @@
+import csv
+import io
+import os
+import secrets
+
 import psycopg
 import reflex as rx
 
@@ -25,6 +30,11 @@ RED = "#c24141"
 
 
 class DashboardState(rx.State):
+    authenticated: bool = False
+    operator: str = ""
+    login_username: str = ""
+    login_password: str = ""
+    login_error: str = ""
     active_view: str = "Overview"
     search: str = ""
     is_loading: bool = True
@@ -50,6 +60,45 @@ class DashboardState(rx.State):
     report_error: str = ""
     report_headers: list[str] = []
     report_rows: list[ReportRow] = []
+    report_csv: str = ""
+    last_updated: str = "Not loaded"
+
+    def set_login_username(self, value: str) -> None:
+        self.login_username = value
+        self.login_error = ""
+
+    def set_login_password(self, value: str) -> None:
+        self.login_password = value
+        self.login_error = ""
+
+    def login(self) -> None:
+        expected_username = os.getenv("WAREHOUSE_USERNAME")
+        expected_password = os.getenv("WAREHOUSE_PASSWORD")
+        if not expected_username or not expected_password:
+            self.login_error = (
+                "Authentication is not configured. Set WAREHOUSE_USERNAME and "
+                "WAREHOUSE_PASSWORD."
+            )
+            return
+        if not (
+            secrets.compare_digest(self.login_username, expected_username)
+            and secrets.compare_digest(self.login_password, expected_password)
+        ):
+            self.login_password = ""
+            self.login_error = "Invalid username or password."
+            return
+        self.authenticated = True
+        self.operator = self.login_username
+        self.login_password = ""
+        self.login_error = ""
+        self.load_dashboard()
+
+    def logout(self) -> None:
+        self.authenticated = False
+        self.operator = ""
+        self.login_username = ""
+        self.login_password = ""
+        self.search = ""
 
     def select_view(self, view: str) -> None:
         self.active_view = view
@@ -77,9 +126,9 @@ class DashboardState(rx.State):
         self.is_loading = True
         self.data_error = ""
         try:
-            metrics = get_dashboard_metrics()
+            metrics = get_dashboard_metrics(self.operator)
         except (OSError, RuntimeError, psycopg.Error) as exc:
-            self.data_error = str(exc)
+            self.data_error = friendly_data_error(exc)
         else:
             self.open_orders = metrics["open_orders"]
             self.units_on_hand = metrics["units_on_hand"]
@@ -87,15 +136,16 @@ class DashboardState(rx.State):
             self.pick_accuracy = f"{metrics['pick_accuracy']:.1f}%"
         finally:
             self.is_loading = False
+        self.last_updated = "Just now"
         self.load_inventory()
 
     def load_inventory(self) -> None:
         self.inventory_loading = True
         self.inventory_error = ""
         try:
-            inventory = get_inventory()
+            inventory = get_inventory(self.operator)
         except (OSError, RuntimeError, psycopg.Error) as exc:
-            self.inventory_error = str(exc)
+            self.inventory_error = friendly_data_error(exc)
             self.inventory_items = []
             self.visible_inventory = []
         else:
@@ -111,9 +161,9 @@ class DashboardState(rx.State):
         self.orders_loading = True
         self.orders_error = ""
         try:
-            orders = get_open_orders()
+            orders = get_open_orders(self.operator)
         except (OSError, RuntimeError, psycopg.Error) as exc:
-            self.orders_error = str(exc)
+            self.orders_error = friendly_data_error(exc)
             self.orders = []
             self.visible_orders = []
         else:
@@ -126,9 +176,9 @@ class DashboardState(rx.State):
         self.batches_loading = True
         self.batches_error = ""
         try:
-            self.batches = get_pick_batches(self.batch_capacity)
+            self.batches = get_pick_batches(self.batch_capacity, self.operator)
         except (OSError, RuntimeError, ValueError, psycopg.Error) as exc:
-            self.batches_error = str(exc)
+            self.batches_error = friendly_data_error(exc)
             self.batches = []
         finally:
             self.batches_loading = False
@@ -141,16 +191,36 @@ class DashboardState(rx.State):
         self.report_loading = True
         self.report_error = ""
         try:
-            headers, rows = get_report(self.report_name)
+            headers, rows = get_report(self.report_name, self.operator)
         except (OSError, RuntimeError, ValueError, psycopg.Error) as exc:
-            self.report_error = str(exc)
+            self.report_error = friendly_data_error(exc)
             self.report_headers = []
             self.report_rows = []
+            self.report_csv = ""
         else:
             self.report_headers = headers
             self.report_rows = rows
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(headers)
+            writer.writerows(row["cells"] for row in rows)
+            self.report_csv = output.getvalue()
         finally:
             self.report_loading = False
+
+    def refresh(self) -> None:
+        self.load_dashboard()
+
+
+def friendly_data_error(exc: Exception) -> str:
+    if isinstance(exc, ValueError):
+        return str(exc)
+    if isinstance(exc, RuntimeError) and str(exc):
+        return str(exc)
+    return (
+        "Could not load live warehouse data. Check DATABASE_URL and database "
+        "availability."
+    )
 
 
 def metric_card(
@@ -416,6 +486,7 @@ def inventory_view() -> rx.Component:
             border_radius="14px",
             padding="20px",
             width="100%",
+            overflow_x="auto",
         ),
         width="100%",
         spacing="4",
@@ -492,6 +563,7 @@ def orders_view() -> rx.Component:
             border_radius="14px",
             padding="20px",
             width="100%",
+            overflow_x="auto",
         ),
         width="100%",
         spacing="4",
@@ -596,6 +668,16 @@ def report_view() -> rx.Component:
                 value=DashboardState.report_name,
                 on_change=DashboardState.select_report,
                 width="220px",
+            ),
+            rx.button(
+                "Download CSV",
+                variant="soft",
+                color_scheme="blue",
+                on_click=rx.download(
+                    data=DashboardState.report_csv,
+                    filename="warehouse-report.csv",
+                    mime_type="text/csv",
+                ),
             ),
             justify="between",
             align="center",
@@ -914,15 +996,42 @@ def header() -> rx.Component:
                 width="210px",
                 size="2",
             ),
-            rx.button("Export report", variant="soft", color_scheme="blue"),
+            rx.button(
+                "Refresh",
+                variant="soft",
+                color_scheme="blue",
+                on_click=DashboardState.refresh,
+            ),
+            rx.button(
+                "Export report",
+                variant="soft",
+                color_scheme="blue",
+                on_click=rx.download(
+                    data=DashboardState.report_csv,
+                    filename="warehouse-report.csv",
+                    mime_type="text/csv",
+                ),
+            ),
             rx.box(
-                rx.text("TA", size="2", weight="bold", color=BLUE),
+                rx.text(
+                    DashboardState.operator,
+                    size="2",
+                    weight="bold",
+                    color=BLUE,
+                ),
                 background="#eaf1ff",
                 border_radius="999px",
                 padding="9px",
             ),
+            rx.button(
+                "Sign out",
+                variant="ghost",
+                color_scheme="gray",
+                on_click=DashboardState.logout,
+            ),
             spacing="3",
             align="center",
+            wrap="wrap",
         ),
         justify="between",
         align="center",
@@ -931,7 +1040,81 @@ def header() -> rx.Component:
     )
 
 
-def index() -> rx.Component:
+def login_view() -> rx.Component:
+    return rx.center(
+        rx.box(
+            rx.vstack(
+                rx.hstack(
+                    rx.box(
+                        rx.text("W", size="4", weight="bold", color="white"),
+                        background=BLUE,
+                        border_radius="9px",
+                        padding="8px 11px",
+                    ),
+                    rx.vstack(
+                        rx.text("Warehouse", size="4", weight="bold", color=INK),
+                        rx.text("Operations portal", size="2", color=MUTED),
+                        align="start",
+                        spacing="0",
+                    ),
+                    spacing="3",
+                    align="center",
+                ),
+                rx.vstack(
+                    rx.text("Sign in", size="6", weight="bold", color=INK),
+                    rx.text(
+                        "Use your warehouse operator account to continue.",
+                        size="2",
+                        color=MUTED,
+                    ),
+                    align="start",
+                    spacing="1",
+                ),
+                rx.input(
+                    placeholder="Username",
+                    value=DashboardState.login_username,
+                    on_change=DashboardState.set_login_username,
+                    width="100%",
+                ),
+                rx.input(
+                    placeholder="Password",
+                    type="password",
+                    value=DashboardState.login_password,
+                    on_change=DashboardState.set_login_password,
+                    width="100%",
+                ),
+                rx.cond(
+                    DashboardState.login_error != "",
+                    rx.callout(
+                        DashboardState.login_error,
+                        icon="triangle-alert",
+                        color_scheme="amber",
+                    ),
+                    rx.fragment(),
+                ),
+                rx.button(
+                    "Sign in",
+                    on_click=DashboardState.login,
+                    color_scheme="blue",
+                    width="100%",
+                ),
+                align="stretch",
+                spacing="4",
+            ),
+            background=CARD,
+            border=f"1px solid {BORDER}",
+            border_radius="16px",
+            box_shadow="0 12px 40px rgba(23, 32, 51, 0.08)",
+            padding="34px",
+            width="min(420px, 92vw)",
+        ),
+        background=BACKGROUND,
+        min_height="100vh",
+        width="100%",
+    )
+
+
+def application_view() -> rx.Component:
     return rx.hstack(
         sidebar(),
         rx.box(
@@ -949,5 +1132,13 @@ def index() -> rx.Component:
     )
 
 
+def index() -> rx.Component:
+    return rx.cond(
+        DashboardState.authenticated,
+        application_view(),
+        login_view(),
+    )
+
+
 app = rx.App()
-app.add_page(index, title="Warehouse Operations", on_load=DashboardState.load_dashboard)
+app.add_page(index, title="Warehouse Operations")

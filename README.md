@@ -37,9 +37,10 @@ The Reflex frontend provides the initial warehouse operations dashboard:
 .venv/bin/reflex run
 ```
 
-The app is organized under `warehouse_dashboard/`. The initial dashboard uses
-representative UI data; the existing PostgreSQL reports are the next integration
-point for the inventory, orders, and reports views.
+The app is organized under `warehouse_dashboard/`. The dashboard loads live
+PostgreSQL data for the overview, inventory, orders, picking, and reports views.
+Use the Refresh control to reload operational data and the report Download CSV
+control to export the selected report.
 Migration safety tests cover rollback of failed migrations and rejection of
 out-of-order files; run the PostgreSQL integration suite to exercise them.
 For a disposable database or a direct `psql` workflow, the compatibility
