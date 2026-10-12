@@ -41,6 +41,16 @@ The app is organized under `warehouse_dashboard/`. The dashboard loads live
 PostgreSQL data for the overview, inventory, orders, picking, and reports views.
 Use the Refresh control to reload operational data and the report Download CSV
 control to export the selected report.
+
+To populate a local database with repeatable demonstration data:
+
+```bash
+DATABASE_URL="postgresql://postgres:postgres@localhost:5432/warehouse" \
+  .venv/bin/python seed_mock_data.py
+```
+
+The seed replaces only its own `DEMO-*` SKUs, `DEMO-*` locations, and `9000001`
+through `9000004` orders, so it can be rerun without duplicating demo records.
 Migration safety tests cover rollback of failed migrations and rejection of
 out-of-order files; run the PostgreSQL integration suite to exercise them.
 For a disposable database or a direct `psql` workflow, the compatibility
